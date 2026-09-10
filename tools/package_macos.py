@@ -44,8 +44,8 @@ if any('SDL2' in dep for dep in deps(binary)) and sdl3.exists():
     queue.append((destination,original))
 while queue:
     target,original=queue.pop(0)
-    changes=[]
-    for dep in deps(original):
+    linked=deps(original);changes=[]
+    for dep in linked:
         if dep.startswith(('/System/Library/','/usr/lib/')):continue
         source=resolve(dep,original)
         if source==original.resolve():continue # dylib's own install id
@@ -71,7 +71,10 @@ while queue:
         if rewritten!=dep:changes.append((dep,rewritten))
     # Modifications invalidate existing signatures; they are replaced below.
     subprocess.run(['codesign','--remove-signature',str(target)],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
-    if target!=binary:command('install_name_tool','-id','@rpath/'+target.name,target)
+    if target!=binary:
+        install_id=linked[0]
+        if not install_id.startswith(('@loader_path/','@rpath/','@executable_path/')):
+            command('install_name_tool','-id','@rpath/'+target.name,target)
     for old,new in changes:command('install_name_tool','-change',old,new,target)
     # No external build paths in runpath load commands.
     details=command('otool','-l',target)
