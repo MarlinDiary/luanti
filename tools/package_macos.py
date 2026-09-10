@@ -73,8 +73,10 @@ while queue:
     subprocess.run(['codesign','--remove-signature',str(target)],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
     if target!=binary:
         install_id=linked[0]
-        if not install_id.startswith(('@loader_path/','@rpath/','@executable_path/')):
-            command('install_name_tool','-id','@rpath/'+target.name,target)
+        rewritten_id='@rpath/'+target.name
+        if (not install_id.startswith(('@loader_path/','@rpath/','@executable_path/'))
+                and len(rewritten_id)<=len(install_id)):
+            command('install_name_tool','-id',rewritten_id,target)
     for old,new in changes:command('install_name_tool','-change',old,new,target)
     # No external build paths in runpath load commands.
     details=command('otool','-l',target)
