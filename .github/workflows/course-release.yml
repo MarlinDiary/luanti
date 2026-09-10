@@ -2,7 +2,7 @@ name: course-release
 on:
   workflow_dispatch:
   push:
-    paths: ['engine/**','sdk/**','tools/package_*.py','pyproject.toml','.github/workflows/course-release.yml']
+    paths: ['engine/**','sdk/**','tools/*.py','pyproject.toml','.gitattributes','.github/workflows/course-release.yml']
 
 jobs:
   sdk:
