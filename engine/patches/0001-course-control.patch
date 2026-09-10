@@ -1,0 +1,657 @@
+diff --git a/src/client/CMakeLists.txt b/src/client/CMakeLists.txt
+index 2f68883..de7c2da 100644
+--- a/src/client/CMakeLists.txt
++++ b/src/client/CMakeLists.txt
+@@ -28,6 +28,8 @@ file(GLOB_RECURSE client_HDRS "${CMAKE_CURRENT_SOURCE_DIR}/*.h")
+ set(client_SRCS
+ 	${client_HDRS}
+ 	${sound_SRCS}
++	${CMAKE_CURRENT_SOURCE_DIR}/course_bridge.cpp
++	${CMAKE_CURRENT_SOURCE_DIR}/course_input_test.cpp
+ 	${CMAKE_CURRENT_SOURCE_DIR}/meshgen/collector.cpp
+ 	${CMAKE_CURRENT_SOURCE_DIR}/render/anaglyph.cpp
+ 	${CMAKE_CURRENT_SOURCE_DIR}/render/core.cpp
+diff --git a/src/client/client.h b/src/client/client.h
+index 2ca5c09..88868a8 100644
+--- a/src/client/client.h
++++ b/src/client/client.h
+@@ -231,6 +231,7 @@ class Client : public con::PeerHandler, public InventoryManager, public IGameDef
+ 	void sendChangePassword(const std::string &oldpassword,
+ 		const std::string &newpassword);
+ 	void sendDamage(u16 damage);
++	uint64_t courseInventoryRevision() const { return m_course_inventory_revision; }
+ 	void sendRespawnLegacy();
+ 	void sendReady();
+ 	void sendHaveMedia(const std::vector<u32> &tokens);
+@@ -610,6 +611,7 @@ class Client : public con::PeerHandler, public InventoryManager, public IGameDef
+ 	bool m_shutdown = false;
+ 
+ 	// CSM restrictions byteflag
++	uint64_t m_course_inventory_revision = 0;
+ 	u64 m_csm_restriction_flags = CSMRestrictionFlags::CSM_RF_NONE;
+ 	u32 m_csm_restriction_noderange = 8;
+ 
+diff --git a/src/client/clientlauncher.cpp b/src/client/clientlauncher.cpp
+index 8d0eaf7..9bcbfcb 100644
+--- a/src/client/clientlauncher.cpp
++++ b/src/client/clientlauncher.cpp
+@@ -1,3 +1,4 @@
++#include <cstdlib>
+ // Luanti
+ // SPDX-License-Identifier: LGPL-2.1-or-later
+ // Copyright (C) 2010-2013 celeron55, Perttu Ahola <celeron55@gmail.com>
+@@ -120,7 +121,9 @@ bool ClientLauncher::run(const GameParams &game_params, const Settings &cmd_args
+ 	m_rendering_engine->setResizable(true);
+ 
+ #if USE_SOUND
+-	g_sound_manager_singleton = createSoundManagerSingleton();
++	// Test-only process setting: never alter the user's system volume/profile.
++	if (!std::getenv("LUANTI_COURSE_TEST_SILENT"))
++		g_sound_manager_singleton = createSoundManagerSingleton();
+ #endif
+ 
+ 	init_input();
+diff --git a/src/client/content_cao.h b/src/client/content_cao.h
+index b1dd79d..0280533 100644
+--- a/src/client/content_cao.h
++++ b/src/client/content_cao.h
+@@ -77,6 +77,9 @@ struct MeshAnimationInfo {
+ 
+ class GenericCAO : public ClientActiveObject
+ {
++	// Client object instances are constructed on the game thread. IDs may be reused.
++	static uint64_t courseNextInstance() { static uint64_t next = 0; return ++next; }
++	const uint64_t m_course_instance = courseNextInstance();
+ private:
+ 
+ 	// Only set at initialization
+@@ -199,6 +202,8 @@ class GenericCAO : public ClientActiveObject
+ 
+ 	inline const ObjectProperties &getProperties() const { return m_prop; }
+ 
++	uint64_t courseInstance() const { return m_course_instance; }
++
+ 	inline const std::string &getName() const { return m_name; }
+ 
+ 	scene::ISceneNode *getSceneNode() const override;
+diff --git a/src/client/game.cpp b/src/client/game.cpp
+index 8c5cc35..0105318 100644
+--- a/src/client/game.cpp
++++ b/src/client/game.cpp
+@@ -3,6 +3,8 @@
+ // Copyright (C) 2010-2013 celeron55, Perttu Ahola <celeron55@gmail.com>
+ 
+ #include "game_internal.h"
++#include "gui/guiFormSpecMenu.h"
++#include <tuple>
+ 
+ #include <cmath>
+ #include <csignal>
+@@ -394,6 +396,9 @@ Game::Game() :
+ 
+ Game::~Game()
+ {
++	CourseBridge::blockHumanInput(false);
++	m_course.reset();
++	if (m_course_label) { m_course_label->remove(); m_course_label = nullptr; }
+ 	delete client;
+ 	soundmaker.reset();
+ 	sound_manager.reset();
+@@ -488,6 +493,19 @@ void Game::run()
+ 		g_profiler->graphPop(dummyvalues);
+ 	}
+ 
++	if (g_settings->getBool("course_control")) {
++		m_course_control.enable();
++		m_course_manual = CourseBridge::manualEpoch();
++		m_course_manual_toggle = CourseBridge::toggleEpoch();
++		try {
++			m_course = std::make_unique<CourseBridge>(porting::path_user);
++			m_course_label = device->getGUIEnvironment()->addStaticText(L"WATCHING | F8: manual play | Python: Game.connect()",
++				core::rect<s32>(12, 8, 860, 38), false, false);
++			m_course_label->setDrawBackground(true);
++			m_course_label->setBackgroundColor(video::SColor(190, 20, 25, 32));
++			m_course_label->setOverrideColor(video::SColor(255, 210, 245, 230));
++		} catch (const std::exception &e) { errorstream << e.what() << std::endl; }
++	}
+ 	draw_times.reset();
+ 
+ 	set_light_curve(g_settings->getFloat("display_gamma"));
+@@ -517,7 +535,7 @@ void Game::run()
+ 		// Calculate dtime =
+ 		//    m_rendering_engine->run() from this iteration
+ 		//  + Sleep time until the wanted FPS are reached
+-		draw_times.limit(device, &dtime);
++		draw_times.limit(device, &dtime, m_course_control.agent());
+ 
+ 		framemarker.start();
+ 
+@@ -557,9 +575,11 @@ void Game::run()
+ 		// since it's invisible to the user. But it needs to be consistent.
+ 		updateCameraOffset();
+ 
++		courseControlEvents();
+ 		processUserInput(dtime);
+ 		// Update camera before player movement to avoid camera lag of one frame
+ 		updateCameraDirection(&cam_view_target, dtime);
++		courseStep(&cam_view_target, dtime);
+ 		if (m_cache_cam_smoothing <= 0.0f) {
+ 			cam_view.camera_yaw = cam_view_target.camera_yaw;
+ 			cam_view.camera_pitch = cam_view_target.camera_pitch;
+@@ -592,12 +612,16 @@ void Game::run()
+ 		processPlayerInteraction(dtime, m_game_ui->m_flags.show_hud);
+ 		updateFrame(&graph, &stats, dtime, cam_view);
+ 		updateProfilerGraphs(&graph);
++		m_course_pressed.clear(); m_course_released.clear();
+ 
+-		if (m_does_lost_focus_pause_game && !device->isWindowFocused() && !isMenuActive()) {
++		if (m_course_control.humanInput() && m_does_lost_focus_pause_game && !device->isWindowFocused() && !isMenuActive()) {
+ 			m_game_formspec.showPauseMenu();
+ 		}
+ 	}
+ 
++	CourseBridge::blockHumanInput(false);
++	m_course.reset();
++	if (m_course_label) { m_course_label->remove(); m_course_label = nullptr; }
+ 	framemarker.end();
+ 
+ #ifdef __ANDROID__
+@@ -1423,8 +1447,12 @@ void Game::processUserInput(f32 dtime)
+ 	if (m_cache_doubletap_jump && runData.jump_timer_down <= 0.4f)
+ 		runData.jump_timer_down += dtime;
+ 
+-	processKeyInput();
+-	processItemSelection(&runData.new_playeritem);
++	if (m_course_control.humanInput()) {
++		processKeyInput();
++		processItemSelection(&runData.new_playeritem);
++	} else if (!m_course_control.agent() && input->cancelPressed()) {
++		m_game_formspec.showPauseMenu();
++	}
+ }
+ 
+ 
+@@ -1938,6 +1966,14 @@ void Game::checkZoomEnabled()
+ void Game::updateCameraDirection(CameraOrientation *cam, float dtime)
+ {
+ 	auto *cur_control = device->getCursorControl();
++	if (!m_course_control.humanInput()) {
++		if (cur_control) {
++			cur_control->setRelativeMode(false);
++			if (!cur_control->isVisible()) cur_control->setVisible(true);
++		}
++		m_first_loop_after_window_activation = true;
++		return;
++	}
+ 
+ 	/* On Linux and Windows, enabling relative mouse mode somehow results
+ 	in simulated mouse events being generated from touch events, even though
+@@ -2040,7 +2076,7 @@ bool Game::getTogglableKeyState(GameKeyType key, bool toggling_enabled, bool pre
+ 	if (!toggling_enabled)
+ 		return isKeyDown(key);
+ 	else
+-		return prev_key_state ^ wasKeyPressed(key);
++		return m_course_control.humanInput() ? prev_key_state ^ wasKeyPressed(key) : isKeyDown(key);
+ }
+ 
+ 
+@@ -2060,7 +2096,7 @@ void Game::updatePlayerControl(const CameraOrientation &cam)
+ 		getAxisValue(KeyType::BACKWARD),
+ 		getAxisValue(KeyType::LEFT),
+ 		getAxisValue(KeyType::RIGHT),
+-		isKeyDown(KeyType::JUMP) || player->getAutojump(),
++		isKeyDown(KeyType::JUMP) || ((m_course_control.humanInput() || m_course_control.agent()) && player->getAutojump()),
+ 		getTogglableKeyState(KeyType::AUX1,  m_cache_toggle_aux1_key, player->control.aux1),
+ 		getTogglableKeyState(KeyType::SNEAK, allow_sneak_toggle,      player->control.sneak),
+ 		isKeyDown(KeyType::ZOOM),
+@@ -2070,9 +2106,17 @@ void Game::updatePlayerControl(const CameraOrientation &cam)
+ 		cam.camera_yaw
+ 	);
+ 	control.setMovementFromKeys();
++	if (m_course_control.agent() && m_course_steering.active) {
++		// World-space steering decouples smooth camera following from collision
++		// steering. Equivalent to ordinary analog/strafe controls, not a teleport.
++		control.course_swim = m_course_steering.swim;
++		control.course_swim_y = m_course_steering.swim_y;
++		control.movement_speed = m_course_steering.speed;
++		control.movement_direction = (cam.camera_yaw - m_course_steering.move_heading) * core::DEGTORAD;
++	}
+ 
+ 	// autoforward if set: move at maximum speed
+-	if (player->getPlayerSettings().continuous_forward &&
++	if (m_course_control.humanInput() && player->getPlayerSettings().continuous_forward &&
+ 			client->activeObjectsReceived() && !player->isDead()) {
+ 		control.movement_speed = 1.0f;
+ 		// sideways movement only
+@@ -2085,7 +2129,7 @@ void Game::updatePlayerControl(const CameraOrientation &cam)
+ 	 * touch then its meaning is inverted (i.e. holding aux1 means walk and
+ 	 * not fast)
+ 	 */
+-	if (g_touchcontrols && m_touch_simulate_aux1) {
++	if (m_course_control.humanInput() && g_touchcontrols && m_touch_simulate_aux1) {
+ 		control.aux1 = control.aux1 ^ true;
+ 	}
+ 
+@@ -2114,7 +2158,7 @@ inline void Game::step(f32 dtime)
+ 	ZoneScoped;
+ 
+ 	if (server) {
+-		float fps_max = !device->isWindowFocused() && simple_singleplayer_mode ?
++		float fps_max = !m_course_control.agent() && !device->isWindowFocused() && simple_singleplayer_mode ?
+ 				g_settings->getFloat("fps_max_unfocused") :
+ 				g_settings->getFloat("fps_max");
+ 		fps_max = std::max(fps_max, 1.0f);
+@@ -2737,6 +2781,18 @@ void Game::processPlayerInteraction(f32 dtime, bool show_hud)
+ 	// but the halo rendering code is already inefficient so there's no point in optimizing it here
+ 	hud->updateSelectionMesh(camera_offset);
+ 
++	// Targeted attack uses the ordinary per-frame raycast and punch path. If
++	// the target moves/recycles/despawns, never turn that click into mining/PvP.
++	if (m_course_control.agent() && m_course_attack_instance) {
++		auto *target = pointed.type == POINTEDTHING_OBJECT ?
++			client->getEnv().getGenericCAO(pointed.object_id) : nullptr;
++		if (!target || target->isPlayer() || target->getId() != m_course_attack_id ||
++				target->courseInstance() != m_course_attack_instance) {
++			m_course_keys.erase(KeyType::DIG); m_course_pressed.erase(KeyType::DIG);
++			m_course_released.insert(KeyType::DIG); player->control.dig = false;
++		}
++	}
++
+ 	// Allow digging again if button is not pressed
+ 	if (runData.digging_blocked && !isKeyDown(KeyType::DIG))
+ 		runData.digging_blocked = false;
+@@ -3813,3 +3869,5 @@ void the_game(volatile std::sig_atomic_t *kill,
+ 
+ 	game.shutdown();
+ }
++
++#include "game_course.inc"
+diff --git a/src/client/game_formspec.cpp b/src/client/game_formspec.cpp
+index aa99c34..b2e77c7 100644
+--- a/src/client/game_formspec.cpp
++++ b/src/client/game_formspec.cpp
+@@ -234,6 +234,7 @@ bool GameFormSpec::handleEmptyFormspec(const std::string &formspec, const std::s
+ 
+ void GameFormSpec::showFormSpec(const std::string &formspec, const std::string &formname)
+ {
++	++m_course_form_revision;
+ 	if (handleEmptyFormspec(formspec, formname))
+ 		return;
+ 
+@@ -251,6 +252,7 @@ void GameFormSpec::showFormSpec(const std::string &formspec, const std::string &
+ 
+ void GameFormSpec::showCSMFormSpec(const std::string &formspec, const std::string &formname)
+ {
++	++m_course_form_revision;
+ 	if (handleEmptyFormspec(formspec, formname))
+ 		return;
+ 
+@@ -293,6 +295,7 @@ void GameFormSpec::showPauseMenuFormSpec(const std::string &formspec, const std:
+ 
+ void GameFormSpec::showNodeFormspec(const std::string &formspec, const v3s16 &nodepos)
+ {
++	++m_course_form_revision;
+ 	infostream << "Launching custom inventory view" << std::endl;
+ 
+ 	InventoryLocation inventoryloc;
+@@ -311,6 +314,7 @@ void GameFormSpec::showNodeFormspec(const std::string &formspec, const v3s16 &no
+ 
+ void GameFormSpec::showPlayerInventory(const std::string *fs_override)
+ {
++	++m_course_form_revision;
+ 	/*
+ 	 * Don't permit to open inventory is CAO or player doesn't exists.
+ 	 * This prevent showing an empty inventory at player load
+@@ -580,3 +584,23 @@ bool GameFormSpec::handleAndroidUIInput()
+ 	return false;
+ }
+ #endif
++
++void GameFormSpec::courseClose()
++{
++	if (!m_formspec || coursePaused()) return;
++	SEvent event{}; event.EventType = EET_KEY_INPUT_EVENT;
++	event.KeyInput.Key = KEY_ESCAPE; event.KeyInput.PressedDown = true;
++	m_formspec->OnEvent(event); ++m_course_form_revision;
++}
++bool GameFormSpec::coursePaused() const { return g_menumgr.pausesGame(); }
++uint64_t GameFormSpec::courseFormId() const
++{
++	return m_formspec && m_formspec->getParent() ? m_course_form_revision : 0;
++}
++std::vector<GUIInventoryList *> GameFormSpec::courseLists() const
++{
++	if (!courseFormId() || coursePaused()) return {};
++	std::vector<GUIInventoryList *> result;
++	for (auto *list : m_formspec->courseLists()) if (list->isTrulyVisible()) result.push_back(list);
++	return result;
++}
+diff --git a/src/client/game_formspec.h b/src/client/game_formspec.h
+index b83e0a6..965020c 100644
+--- a/src/client/game_formspec.h
++++ b/src/client/game_formspec.h
+@@ -7,6 +7,8 @@
+ #include <memory>
+ #include <string>
+ #include "irr_v3d.h"
++#include "gui/guiInventoryList.h"
++#include <vector>
+ #include "scripting_pause_menu.h"
+ 
+ class Client;
+@@ -45,6 +47,10 @@ struct GameFormSpec
+ 
+ 	bool handleCallbacks();
+ 	void reset();
++	void courseClose();
++	bool coursePaused() const;
++	uint64_t courseFormId() const;
++	std::vector<GUIInventoryList *> courseLists() const;
+ 
+ #ifdef __ANDROID__
+ 	// Returns false if no formspec open
+@@ -52,6 +58,7 @@ struct GameFormSpec
+ #endif
+ 
+ private:
++	uint64_t m_course_form_revision = 0;
+ 	Client *m_client;
+ 	RenderingEngine *m_rendering_engine;
+ 	InputHandler *m_input;
+diff --git a/src/client/game_internal.h b/src/client/game_internal.h
+index 21efc02..a0a6924 100644
+--- a/src/client/game_internal.h
++++ b/src/client/game_internal.h
+@@ -21,6 +21,12 @@
+ #include "irrlichttypes_bloated.h"
+ #include "log_internal.h"
+ #include "sky.h"
++#include "course_bridge.h"
++#include "course_control.h"
++#include "course_steering.h"
++#include <chrono>
++#include <set>
++#include <IGUIStaticText.h>
+ #include "util/pointedthing.h"
+ 
+ /* DO NOT INCLUDE THIS FROM OUTSIDE GAME.CPP */
+@@ -221,6 +227,19 @@ class Game {
+ 	void updateShadows();
+ 	void drawScene(ProfilerGraph *graph, RunStats *stats);
+ 
++	void courseStep(CameraOrientation *cam, float dtime);
++	void courseRelease(bool relinquish);
++	void courseControlEvents();
++	std::unique_ptr<CourseBridge> m_course;
++	gui::IGUIStaticText *m_course_label = nullptr;
++	uint64_t m_course_frame = 0, m_course_session = 0, m_course_manual = 0, m_course_manual_toggle = 0;
++	uint64_t m_course_attack_instance = 0;
++	u16 m_course_attack_id = 0;
++	CourseControl m_course_control;
++	CourseSteering m_course_steering;
++	std::set<GameKeyType> m_course_keys, m_course_pressed, m_course_released;
++	std::chrono::steady_clock::time_point m_course_deadline;
++	bool courseKey(GameKeyType) const { return m_course_control.enabled() && !m_course_control.humanInput(); }
+ 	// Misc
+ 	void showOverlayMessage(const char *msg, float dtime, int percent,
+ 			float *indef_pos = nullptr);
+@@ -238,23 +257,23 @@ class Game {
+ 
+ 	inline float getAxisValue(GameKeyType k)
+ 	{
+-		return input->getAxisValue(k);
++		return courseKey(k) ? (m_course_keys.count(k) ? 1.0f : 0.0f) : input->getAxisValue(k);
+ 	}
+ 	inline bool isKeyDown(GameKeyType k)
+ 	{
+-		return input->isKeyDown(k);
++		return courseKey(k) ? (m_course_keys.count(k)) : input->isKeyDown(k);
+ 	}
+ 	inline bool wasKeyDown(GameKeyType k)
+ 	{
+-		return input->wasKeyDown(k);
++		return courseKey(k) ? (m_course_pressed.count(k)) : input->wasKeyDown(k);
+ 	}
+ 	inline bool wasKeyPressed(GameKeyType k)
+ 	{
+-		return input->wasKeyPressed(k);
++		return courseKey(k) ? (m_course_pressed.count(k)) : input->wasKeyPressed(k);
+ 	}
+ 	inline bool wasKeyReleased(GameKeyType k)
+ 	{
+-		return input->wasKeyReleased(k);
++		return m_course_released.count(k) || (!courseKey(k) && input->wasKeyReleased(k));
+ 	}
+ 
+ #ifdef __ANDROID__
+diff --git a/src/client/gameui.cpp b/src/client/gameui.cpp
+index 29408ff..776bf0c 100644
+--- a/src/client/gameui.cpp
++++ b/src/client/gameui.cpp
+@@ -198,6 +198,8 @@ void GameUI::updateChatSize()
+ {
+ 	// Update gui element size and position
+ 	s32 chat_y = 5;
++	if (g_settings->getBool("course_control"))
++		chat_y += g_fontengine->getTextHeight() + 20;
+ 
+ 	if (m_flags.show_minimal_debug)
+ 		chat_y += m_guitext->getTextHeight();
+diff --git a/src/client/inputhandler.cpp b/src/client/inputhandler.cpp
+index e166fd0..83a3f8b 100644
+--- a/src/client/inputhandler.cpp
++++ b/src/client/inputhandler.cpp
+@@ -7,6 +7,7 @@
+ #include "settings.h"
+ #include "util/numeric.h"
+ #include "inputhandler.h"
++#include "course_bridge.h"
+ #include "gui/mainmenumanager.h"
+ #include "gui/touchcontrols.h"
+ #include "hud_element.h"
+@@ -229,6 +230,13 @@ bool MyEventReceiver::OnEvent(const SEvent &event)
+ 	if (event.EventType == EET_KEY_INPUT_EVENT) {
+ 		KeyPress keyCode(event.KeyInput);
+ 
++		// F8 is an explicit local opt-in, never a remote command or mouse click.
++		if (g_settings->getBool("course_control") && keyCode == KeyPress::getSpecialKey("KEY_F8")) {
++			if (event.KeyInput.PressedDown && !course_manual_key_down)
++				CourseBridge::toggleManual();
++			course_manual_key_down = event.KeyInput.PressedDown;
++			return true;
++		}
+ 		if (keySettingHasMatch("keymap_fullscreen", keyCode)) {
+ 			if (event.KeyInput.PressedDown && !fullscreen_is_down) {
+ 				IrrlichtDevice *device = RenderingEngine::get_raw_device();
+@@ -246,6 +254,7 @@ bool MyEventReceiver::OnEvent(const SEvent &event)
+ 			close_world_down = event.KeyInput.PressedDown;
+ 
+ 		} else if (keyCode == EscapeKey) {
++			if (event.KeyInput.PressedDown && !esc_down) CourseBridge::manualTakeover();
+ 			esc_down = event.KeyInput.PressedDown;
+ 		}
+ 
+@@ -260,6 +269,20 @@ bool MyEventReceiver::OnEvent(const SEvent &event)
+ 	else if (event.EventType == EET_TOUCH_INPUT_EVENT)
+ 		last_pointer_type = PointerType::Touch;
+ 
++	// Consume physical input BEFORE GUI preprocessing as well as gameplay.
++	// Otherwise a click could change an agent-owned inventory/crafting form.
++	// Escape, F8 and the window-management shortcuts above remain available.
++	if (CourseBridge::humanInputBlocked()) {
++		switch (event.EventType) {
++		case EET_KEY_INPUT_EVENT: case EET_MOUSE_INPUT_EVENT:
++		case EET_TOUCH_INPUT_EVENT: case EET_STRING_INPUT_EVENT:
++		case EET_GAMEPAD_BUTTON_EVENT: case EET_GAMEPAD_AXIS_EVENT:
++		case EET_USER_EVENT:
++			return true;
++		default: break;
++		}
++	}
++
+ 	// Let the menu handle events, if one is active.
+ 	if (isMenuActive()) {
+ 		if (g_touchcontrols)
+diff --git a/src/client/inputhandler.h b/src/client/inputhandler.h
+index 90cd47a..afd0243 100644
+--- a/src/client/inputhandler.h
++++ b/src/client/inputhandler.h
+@@ -163,6 +163,7 @@ class MyEventReceiver : public IEventReceiver
+ 
+ 	// Intentionally not reset by clearInput/releaseAllKeys.
+ 	bool fullscreen_is_down = false;
++	bool course_manual_key_down = false;
+ 
+ 	bool close_world_down = false;
+ 	bool esc_down = false;
+diff --git a/src/client/localplayer.cpp b/src/client/localplayer.cpp
+index a3ba7f7..5de8d6e 100644
+--- a/src/client/localplayer.cpp
++++ b/src/client/localplayer.cpp
+@@ -3,6 +3,7 @@
+ // Copyright (C) 2010-2013 celeron55, Perttu Ahola <celeron55@gmail.com>
+ 
+ #include "localplayer.h"
++#include "course_steering.h"
+ #include <cmath>
+ #include "mtevent.h"
+ #include "collision.h"
+@@ -534,6 +535,15 @@ void LocalPlayer::move(f32 dtime, Environment *env)
+ 
+ void LocalPlayer::applyControl(float dtime, Environment *env)
+ {
++	// ClientEnvironment calls this for every physics substep, including a
++	// substep immediately after water-to-ground contact in the same frame.
++	if (control.course_swim) {
++		CourseSteering swim;
++		swim.active = swim.swim = true;
++		swim.swim_y = control.course_swim_y;
++		swim.swimKeys(getPosition().Y / BS, getSpeed().Y / BS,
++			in_liquid || in_liquid_stable, control.jump, control.sneak, m_can_jump);
++	}
+ 	// Clear stuff
+ 	swimming_vertical = false;
+ 	swimming_pitch = false;
+diff --git a/src/client/renderingengine.cpp b/src/client/renderingengine.cpp
+index ccc4452..cc431ee 100644
+--- a/src/client/renderingengine.cpp
++++ b/src/client/renderingengine.cpp
+@@ -35,9 +35,9 @@ void FpsControl::reset()
+ 	last_time = porting::getTimeUs();
+ }
+ 
+-void FpsControl::limit(IrrlichtDevice *device, f32 *dtime)
++void FpsControl::limit(IrrlichtDevice *device, f32 *dtime, bool active_work)
+ {
+-	const float fps_limit = device->isWindowFocused()
++	const float fps_limit = (device->isWindowFocused() || active_work)
+ 			? g_settings->getFloat("fps_max")
+ 			: g_settings->getFloat("fps_max_unfocused");
+ 	const u64 frametime_min = 1000000.0f / std::max(fps_limit, 1.0f);
+diff --git a/src/client/renderingengine.h b/src/client/renderingengine.h
+index cd3b920..4a08281 100644
+--- a/src/client/renderingengine.h
++++ b/src/client/renderingengine.h
+@@ -42,7 +42,7 @@ struct FpsControl {
+ 
+ 	void reset();
+ 
+-	void limit(IrrlichtDevice *device, f32 *dtime);
++	void limit(IrrlichtDevice *device, f32 *dtime, bool active_work = false);
+ 
+ 	u32 getBusyMs() const { return busy_time / 1000; }
+ 
+diff --git a/src/defaultsettings.cpp b/src/defaultsettings.cpp
+index 57fab16..e008fa2 100644
+--- a/src/defaultsettings.cpp
++++ b/src/defaultsettings.cpp
+@@ -72,6 +72,7 @@ static bool detect_touch()
+ void set_default_settings()
+ {
+ 	Settings *settings = Settings::createLayer(SL_DEFAULTS);
++	settings->setDefault("course_control", "true");
+ 	bool has_touch = detect_touch();
+ 
+ 	// Client and server
+diff --git a/src/gui/guiFormSpecMenu.h b/src/gui/guiFormSpecMenu.h
+index 4ae8045..11d5c84 100644
+--- a/src/gui/guiFormSpecMenu.h
++++ b/src/gui/guiFormSpecMenu.h
+@@ -298,6 +298,7 @@ class GUIFormSpecMenu : public GUIModalMenu
+ 
+ 	s16 getNextInventoryRing(const InventoryLocation &inventoryloc, const std::string &listname);
+ 
++	const std::vector<GUIInventoryList *> &courseLists() const { return m_inventorylists; }
+ 	void acceptInput(FormspecQuitMode quitmode=quit_mode_no);
+ 	bool preprocessEvent(const SEvent& event) override;
+ 	bool OnEvent(const SEvent& event) override;
+diff --git a/src/gui/guiInventoryList.h b/src/gui/guiInventoryList.h
+index 71e4e71..d18d26e 100644
+--- a/src/gui/guiInventoryList.h
++++ b/src/gui/guiInventoryList.h
+@@ -77,6 +77,8 @@ class GUIInventoryList : public gui::IGUIElement
+ 
+ 	void setHoveredIndex(s32 item_i);
+ 
++	s32 courseFirstSlot() const { return m_start_item_i; }
++	s32 courseLastSlot() const { return m_start_item_i + m_geom.X * m_geom.Y - 1; }
+ 	const InventoryLocation &getInventoryloc() const
+ 	{
+ 		return m_inventoryloc;
+diff --git a/src/network/clientpackethandler.cpp b/src/network/clientpackethandler.cpp
+index 589d03b..ace20cf 100644
+--- a/src/network/clientpackethandler.cpp
++++ b/src/network/clientpackethandler.cpp
+@@ -340,6 +340,7 @@ void Client::handleCommand_BlockData(NetworkPacket* pkt)
+ 
+ void Client::handleCommand_Inventory(NetworkPacket* pkt)
+ {
++	++m_course_inventory_revision;
+ 	if (pkt->getSize() < 1)
+ 		return;
+ 
+diff --git a/src/player.h b/src/player.h
+index b5a1da1..1dde257 100644
+--- a/src/player.h
++++ b/src/player.h
+@@ -95,6 +95,9 @@ struct PlayerControl
+ 	float yaw = 0.0f;
+ 	float movement_speed = 0.0f;
+ 	float movement_direction = 0.0f;
++	// Client-local Course state: never serialized as a server command.
++	bool course_swim = false;
++	float course_swim_y = 0.0f;
+ };
+ 
+ struct PlayerPhysicsOverride
+diff --git a/src/porting.cpp b/src/porting.cpp
+index 4c24e8c..ca84b57 100644
+--- a/src/porting.cpp
++++ b/src/porting.cpp
+@@ -751,10 +751,25 @@ void initializePaths()
+ #  endif // _WIN32
+ 
+ 	// Migrate cache folder to new location if possible
+-	migrateCachePath();
++	// Course profile uses its own cache; do not migrate an existing Luanti profile.
+ 
+ #endif // RUN_IN_PLACE
+ 
++	if (auto explicit_profile = getUserPathEnvVar()) {
++		path_user = *explicit_profile;
++	} else {
++#ifdef _WIN32
++		const char *appdata = getenv("APPDATA");
++		if (!appdata) throw std::runtime_error("APPDATA is unavailable");
++		path_user = std::string(appdata) + DIR_DELIM "LuantiCourse";
++#elif defined(__APPLE__)
++		path_user = std::string(getHomeOrFail()) + "/Library/Application Support/LuantiCourse";
++#else
++		const char *data = getenv("XDG_DATA_HOME");
++		path_user = (data && *data ? std::string(data) : std::string(getHomeOrFail()) + "/.local/share") + "/luanti-course";
++#endif
++	}
++	path_cache = path_user + DIR_DELIM "cache";
+ 	assert(!path_share.empty());
+ 	assert(!path_user.empty());
+ 	assert(!path_cache.empty());

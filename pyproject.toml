@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "luanti-course"
+version = "0.12.0"
+description = "A small Python SDK for the visible Luanti Course client"
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+dependencies = []
+
+[project.scripts]
+luanti-course = "luanti_course.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["sdk/src"]
+
+[tool.setuptools.package-data]
+luanti_course = ["data/*.json"]

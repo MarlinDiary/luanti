@@ -1,0 +1,83 @@
+name: course-release
+on:
+  workflow_dispatch:
+  push:
+    paths: ['engine/**','sdk/**','tools/package_*.py','pyproject.toml','.github/workflows/course-release.yml']
+
+jobs:
+  sdk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.11'}
+      - run: python -m unittest discover -s tests/unit -p 'test_*.py'
+      - run: python -m pip wheel --no-deps . -w dist
+      - uses: actions/upload-artifact@v4
+        with: {name: python-sdk, path: dist/*.whl}
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.11'}
+      - name: Prepare pinned source
+        shell: pwsh
+        run: |
+          git clone https://github.com/luanti-org/luanti.git upstream
+          git -C upstream checkout c0e6812b1a4260bb25a1f606f70f55f4962bb97d
+          python tools/prepare_engine.py upstream
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: CLANG64
+          update: true
+          install: >-
+            git mingw-w64-clang-x86_64-clang mingw-w64-clang-x86_64-cmake
+            mingw-w64-clang-x86_64-ninja mingw-w64-clang-x86_64-curl-winssl
+            mingw-w64-clang-x86_64-libpng mingw-w64-clang-x86_64-libjpeg-turbo
+            mingw-w64-clang-x86_64-freetype mingw-w64-clang-x86_64-libogg
+            mingw-w64-clang-x86_64-libvorbis mingw-w64-clang-x86_64-sqlite3
+            mingw-w64-clang-x86_64-openal mingw-w64-clang-x86_64-zstd
+            mingw-w64-clang-x86_64-gettext mingw-w64-clang-x86_64-luajit
+            mingw-w64-clang-x86_64-SDL2
+      - name: Build and bundle
+        shell: msys2 {0}
+        run: |
+          cmake -S upstream -B native-build -G Ninja -DRUN_IN_PLACE=TRUE -DCMAKE_BUILD_TYPE=Release
+          cmake --build native-build --parallel 4
+          upstream/util/bundle_dlls.sh upstream/bin/luanti.exe upstream/bin/
+      - name: Package
+        shell: pwsh
+        run: python tools/package_windows.py --source upstream --output dist/Luanti-Course-Windows-x64.zip
+      - uses: actions/upload-artifact@v4
+        with: {name: windows-x64, path: 'dist/Luanti-Course-Windows-x64.zip*'}
+
+  macos:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.11'}
+      - name: Prepare pinned source
+        run: |
+          git clone https://github.com/luanti-org/luanti.git upstream
+          git -C upstream checkout c0e6812b1a4260bb25a1f606f70f55f4962bb97d
+          python tools/prepare_engine.py upstream
+      - name: Build
+        run: |
+          brew install cmake ninja sdl2 jpeg-turbo libpng freetype gettext libogg libvorbis gmp jsoncpp openssl@3 zstd
+          cmake -S upstream -B native-build -G Ninja -DRUN_IN_PLACE=FALSE -DCMAKE_BUILD_TYPE=Release -DENABLE_SOUND=FALSE -DCMAKE_INSTALL_PREFIX="$PWD/native-install"
+          cmake --build native-build --parallel 4
+          cmake --install native-build
+      - name: Package relocatable app
+        run: |
+          mkdir -p dist
+          python tools/package_macos.py --installed native-install/luanti.app --output 'dist/Luanti Course.app'
+          ditto -c -k --sequesterRsrc --keepParent 'dist/Luanti Course.app' 'dist/Luanti-Course-macOS-arm64.zip'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-arm64
+          path: |
+            dist/Luanti-Course-macOS-arm64.zip
+            dist/Luanti Course.app.packaging.json

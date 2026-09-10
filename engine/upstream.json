@@ -1,0 +1,7 @@
+{
+  "repository": "https://github.com/luanti-org/luanti.git",
+  "commit": "c0e6812b1a4260bb25a1f606f70f55f4962bb97d",
+  "version": "5.17.0",
+  "protocol": 1,
+  "course_version": "0.9.0"
+}
