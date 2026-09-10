@@ -44,7 +44,7 @@ jobs:
       - name: Build and bundle
         shell: msys2 {0}
         run: |
-          cmake -S upstream -B native-build -G Ninja -DRUN_IN_PLACE=TRUE -DCMAKE_BUILD_TYPE=Release
+          cmake -S upstream -B native-build -G Ninja -DRUN_IN_PLACE=TRUE -DCMAKE_BUILD_TYPE=Release -DBUILD_UNITTESTS=FALSE -DBUILD_DOCUMENTATION=FALSE -DENABLE_POSTGRESQL=FALSE
           cmake --build native-build --parallel 4
           upstream/util/bundle_dlls.sh upstream/bin/luanti.exe upstream/bin/
       - name: Package
@@ -67,7 +67,7 @@ jobs:
       - name: Build
         run: |
           brew install cmake ninja sdl2 jpeg-turbo libpng freetype gettext libogg libvorbis gmp jsoncpp openssl@3 zstd
-          cmake -S upstream -B native-build -G Ninja -DRUN_IN_PLACE=FALSE -DCMAKE_BUILD_TYPE=Release -DENABLE_SOUND=FALSE -DCMAKE_INSTALL_PREFIX="$PWD/native-install"
+          cmake -S upstream -B native-build -G Ninja -DRUN_IN_PLACE=FALSE -DCMAKE_BUILD_TYPE=Release -DBUILD_UNITTESTS=FALSE -DBUILD_DOCUMENTATION=FALSE -DENABLE_POSTGRESQL=FALSE -DENABLE_SOUND=FALSE -DCMAKE_INSTALL_PREFIX="$PWD/native-install"
           cmake --build native-build --parallel 4
           cmake --install native-build
       - name: Package relocatable app

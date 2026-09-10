@@ -58,7 +58,17 @@ while queue:
             seen[name]=source;origins[name]={'source':str(source),'sha256':hashlib.sha256(source.read_bytes()).hexdigest()}
             queue.append((destination,source))
         prefix='@executable_path/../Frameworks/' if target==binary else '@loader_path/'
-        changes.append((dep,prefix+name))
+        # Keep an existing short Frameworks alias (for example libzstd.1.dylib)
+        # instead of growing its load command to the resolved versioned name.
+        # Some release binaries have no spare Mach-O header padding for that.
+        link_name=Path(dep).name if dep.startswith(('@loader_path/','@rpath/','@executable_path/')) else name
+        if link_name!=name:
+            alias=frameworks/link_name
+            if alias.exists() or alias.is_symlink():
+                if alias.resolve()!=frameworks/name:raise RuntimeError('Library alias collision: '+link_name)
+            else:alias.symlink_to(name)
+        rewritten=prefix+link_name
+        if rewritten!=dep:changes.append((dep,rewritten))
     # Modifications invalidate existing signatures; they are replaced below.
     subprocess.run(['codesign','--remove-signature',str(target)],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
     if target!=binary:command('install_name_tool','-id','@rpath/'+target.name,target)

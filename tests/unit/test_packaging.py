@@ -19,5 +19,7 @@ class PackagingTests(unittest.TestCase):
         text=(ROOT/'.github/workflows/course-release.yml').read_text()
         self.assertIn('runs-on: windows-latest',text);self.assertIn('runs-on: macos-15',text)
         self.assertIn('python tools/prepare_engine.py upstream',text)
+        self.assertEqual(text.count('-DBUILD_UNITTESTS=FALSE'),2)
+        self.assertEqual(text.count('-DENABLE_POSTGRESQL=FALSE'),2)
 
 if __name__=='__main__':unittest.main()
