@@ -39,7 +39,7 @@
 
 - 学生仍负责目标、材料采购、挖矿路线和中断后的策略。SDK 不自动实现空手到钻石。
 - 盾牌、远程武器、可见投射物/爆炸反应和持续燃烧已有专用实现；离开火源仍不等于灭火，找不到已观察水域会明确返回 blocked。
-- Windows workflow/ZIP 结构已有自动化，原生 runner/实机证据仍待取得；macOS 应用已本机执行但仍是 ad-hoc 签名。模型无关参考 Agent 已加入。Python SDK 为 3.9+、零运行时第三方依赖。
+- Windows workflow 已在原生 runner 完成编译、DLL 收集、ZIP 和清单；Windows 实机交互仍待验。macOS 应用已在本机执行，并在 macOS runner 完成可迁移 ZIP，但仍是 ad-hoc 签名。模型无关参考 Agent 已加入。Python SDK 为 3.9+、零运行时第三方依赖。
 - 场景覆盖不代表任意未知地形、网络条件或模组都保证成功。
 
 ## 产物与回滚

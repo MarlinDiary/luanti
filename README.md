@@ -4,7 +4,7 @@
 
 本轮补齐了持续燃烧、盾牌、弓箭、来袭投射物和爆炸威胁；生存监督仍只做快速保命反应，任务目标与失败后的重新规划仍由学生负责。`Agent`/`CommandPlanner` 提供一个模型厂商无关的参考循环：每轮只接收有限观察、选择一个白名单技能、读取真实 `SkillResult` 后再规划，不内置“获得钻石”等课程答案。见 [课程版收尾](docs/course-completion.md) 和 [参考 Agent](docs/reference-agent.md)。
 
-macOS 应用已在本机做后台、静音、无鼠标捕获和真实引擎长流程验证；Windows 已提供可复现的 CI 构建、DLL 收集与 ZIP 清单验证，但仍需 Windows runner/实机执行后才算该平台验收完成。见 [跨平台交付](docs/cross-platform.md)。
+macOS 应用已在本机做后台、静音、无鼠标捕获和真实引擎长流程验证；同一提交的 GitHub CI 已实际完成 macOS arm64、Windows x64 和 Python wheel 构建并上传制品。Windows 实机启动、控制与焦点冒烟仍单列待验，不用 runner 编译代替。见 [跨平台交付](docs/cross-platform.md)。
 
 ## 水边采集修复（0.11.8）
 
@@ -81,7 +81,7 @@ with Game.connect() as game:      # 先在课程客户端中进入世界
 
 ## 安装与运行
 
-当前开发产物在 `dist/`：macOS Apple Silicon 应用与 Python wheel。打开课程客户端并进入世界，再安装 wheel：
+当前开发产物在 `dist/`：macOS Apple Silicon 应用、Windows x64 ZIP 与 Python wheel。打开课程客户端并进入世界，再安装 wheel：
 
 ```sh
 python -m pip install --upgrade dist/luanti_course-0.12.0-py3-none-any.whl
@@ -94,7 +94,7 @@ python -m luanti_course doctor
 
 最新完成项、真实服与平台待验项集中在 [SDK 收尾状态](docs/sdk-closure.md)；下方带版本号的段落保留开发沿革，不代表全部功能的当前上限。
 
-这是经过本地功能验收和真实课程服务器只读/普通玩家权限联调的开发版本，不代表所有地图、网络与操作系统配置。基础联调见 [远程联调记录](docs/remote-validation.md)，本轮实况与剩余边界见 [课程版收尾](docs/course-completion.md)。Windows 构建流程和 ZIP 结构已有自动化验证，原生 runner/实机结果仍单列为待验；macOS 应用目前为 ad-hoc 签名。参考 Agent 已加入，但它只执行模型返回的白名单技能，不代替学生的任务策略。
+这是经过本地功能验收和真实课程服务器只读/普通玩家权限联调的开发版本，不代表所有地图、网络与操作系统配置。基础联调见 [远程联调记录](docs/remote-validation.md)，本轮实况与剩余边界见 [课程版收尾](docs/course-completion.md)。Windows 原生 runner 已完成构建、DLL 收集、ZIP 与清单验证；Windows 实机交互仍待验。macOS 应用目前为 ad-hoc 签名。参考 Agent 已加入，但它只执行模型返回的白名单技能，不代替学生的任务策略。
 
 只使用客户端已获得且服务器允许观察的数据。内置 VoxeLibre 配方包有固定来源版本，合成执行以服务器预览与实际背包为准。测试用世界和配方导出脚本不安装到课程服务器。
 
