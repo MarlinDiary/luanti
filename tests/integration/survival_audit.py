@@ -96,6 +96,33 @@ with session.connect(Game) as g:
   assert g.observe().position[0]<10
   return dict(task=r.to_dict(),events=events)
  case('interrupt_navigation',preemption)
+ def collect_preemption():
+  # Match the course-server failure mode: a real hostile approaches while a
+  # long collection job owns the action lock. The guard must cancel that job,
+  # flee to a confirmed safe distance, and keep the player alive.
+  scene(g,'collect_preempt',night=True,
+        nodes=[(7,100,z,'mcl_core:tree') for z in range(3)],
+        inventory=['mcl_tools:axe_iron'],
+        entities=[dict(name='mobs_mc:zombie',position=[0,99.51,9])])
+  config=SurvivalConfig(enemies='avoid',threat_radius=7,safe_distance=12,
+                        poll_interval=.05,action_timeout=30)
+  with g.survival(config) as guard:
+   task=g.collect('mcl_core:tree',3,timeout=45);events=[];end=time.monotonic()+35
+   while time.monotonic()<end:
+    events.extend(guard.events())
+    finished=[e for e in events if e['event']=='reaction_finished']
+    if any(e['result']['status']=='success' for e in finished) and guard.wait_idle(.2):break
+    if guard.paused:break
+    time.sleep(.05)
+  state=g.observe()
+  assert task.status=='cancelled' and task.reason=='survival_interrupted',task
+  assert task.details['intervention']['action']=='flee_from',task
+  assert any(e['event']=='interrupt_requested' for e in events),events
+  assert any(e['event']=='reaction_finished' and e['result']['status']=='success'
+             for e in events),events
+  assert not state.dead and state.hp>0,(state.raw,events)
+  return dict(task=task.to_dict(),events=events,final_hp=state.hp)
+ case('interrupt_collect_hostile',collect_preemption)
  def paused():
   scene(g,'paused',hunger=8,inventory=['mcl_core:apple 5'])
   with g.survival() as guard:

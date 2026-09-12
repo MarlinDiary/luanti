@@ -23,6 +23,10 @@ def first_steer(w,position,path,target):
  except Captured:pass
  return calls[0]
 class NaturalnessTests(unittest.TestCase):
+ def test_observation_reports_native_camera_rate_state(self):
+  source=(Path(__file__).resolve().parents[2]/'engine/src/game_course.inc').read_text()
+  self.assertIn('r["steering_yaw_velocity"] = m_course_steering.yaw_velocity',source)
+  self.assertIn('r["steering_pitch_velocity"] = m_course_steering.pitch_velocity',source)
  def test_diagonal_open_water_does_not_alternate_grid_headings(self):
   path=[(0,1,0)]+[p for i in range(1,6) for p in ((i,1,i-1),(i,1,i))]
   command=first_steer(pool(),(0,.05,0),path,(5,.05,5))

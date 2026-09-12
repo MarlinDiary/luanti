@@ -11,9 +11,13 @@ int main() {
  for (float fps : {30.0f,60.0f,144.0f}) {
   CourseSteering s; s.active=true;s.heading=90;
   float yaw=0,pitch=20;
+  float previous_speed=0;
   for (int i=0;i<fps*2;i++) {
    float old=yaw;s.step(yaw,pitch,1/fps);
-   if(yaw<old || yaw-old>360/fps+.001 || yaw>90.001)return 1;
+   float speed=(yaw-old)*fps;
+   if(yaw<old || speed>225.001 || yaw>90.001)return 1;
+   if(std::abs(speed-previous_speed)>900/fps+.01)return 14;
+   previous_speed=speed;
   }
   if(std::abs(yaw-90)>.01 || std::abs(pitch)>.01)return 2;
   ++checks;
@@ -22,7 +26,7 @@ int main() {
  float yaw=359,pitch=0;s.step(yaw,pitch,.016f);
  if(!(yaw>359 && yaw<361))return 3;++checks;
  s.clear();float old=yaw;s.step(yaw,pitch,.1f);
- if(yaw!=old || s.speed!=0 || s.active)return 4;++checks;
+ if(yaw!=old || s.speed!=0 || s.active || s.yaw_velocity!=0 || s.pitch_velocity!=0)return 4;++checks;
  // World direction compensation: smooth view must not steer into a wall.
  for(float view : {0.0f,30.0f,80.0f}) {
   float desired=-90,relative=(view-desired)*3.141592653589793/180;

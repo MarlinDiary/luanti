@@ -263,10 +263,18 @@ def face(ctx, point):
     yaw=math.degrees(math.atan2(-dx,dz))
     pitch=max(-89.9,min(89.9,math.degrees(math.atan2(-dy,math.hypot(dx,dz)))))
     if abs((state.yaw-yaw+180)%360-180)<.5 and abs(state.pitch-pitch)<.5:return state
-    ctx.game._submit('steer',heading=yaw,pitch=pitch,speed=0,jump=False,duration_ms=1000)
+    end=min(ctx.deadline,time.monotonic()+1.7)
     try:
-        return ctx.wait(lambda s:abs((s.yaw-yaw+180)%360-180)<.5 and abs(s.pitch-pitch)<.5,
-                        timeout=.95,reason='aim_unconfirmed')
+        while time.monotonic()<end:
+            state=ctx.read()
+            if abs((state.yaw-yaw+180)%360-180)<.5 and abs(state.pitch-pitch)<.5:
+                return state
+            # Native steer leases are intentionally capped at one second.
+            # Renew the same target while its velocity-aware easing finishes;
+            # this retains angular velocity and never restarts the turn.
+            ctx.game._submit('steer',heading=yaw,pitch=pitch,speed=0,jump=False,duration_ms=1000)
+            ctx.sleep(.04)
+        raise Failure('aim_unconfirmed')
     finally:
         ctx.stop_input()
 

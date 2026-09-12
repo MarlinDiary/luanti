@@ -140,6 +140,11 @@ void Game::courseStep(CameraOrientation *cam, float dtime)
                 r["control_epoch"] = Json::UInt64(m_course_control.epoch());
                 r["input_active"] = !m_course_keys.empty();
                 r["steering_active"] = m_course_steering.active;
+                // Report the controller's own rate state. RPC arrival and
+                // render-frame clocks are asynchronous, so deriving an
+                // instantaneous rate from two observe replies is not sound.
+                r["steering_yaw_velocity"] = m_course_steering.yaw_velocity;
+                r["steering_pitch_velocity"] = m_course_steering.pitch_velocity;
                 r["steering_speed"] = m_course_steering.speed;
 #if USE_SOUND
                 r["audio_enabled"] = bool(g_sound_manager_singleton);

@@ -83,7 +83,7 @@ session=Session(a.session);results=[]
 def write(name,v):(a.out/name).write_text(json.dumps(v,ensure_ascii=False,indent=2,default=str))
 def delta(a,b):return (b-a+180)%360-180
 def sample(s):
- return dict(t=time.monotonic(),frame=s.frame,position=s.position,eye=s.eye,yaw=s.yaw,pitch=s.pitch,**{k:s.raw.get(k) for k in ('velocity','in_liquid','touching_ground','input_active','steering_active','control','audio_enabled','human_input_enabled','breath','hp')})
+ return dict(t=time.monotonic(),frame=s.frame,position=s.position,eye=s.eye,yaw=s.yaw,pitch=s.pitch,**{k:s.raw.get(k) for k in ('velocity','in_liquid','touching_ground','input_active','steering_active','steering_yaw_velocity','steering_pitch_velocity','control','audio_enabled','human_input_enabled','breath','hp')})
 def metrics(rows,sc,actions,events):
  active=[r for r in rows if actions[0]['begin']<=r['t']<=actions[-1]['end']]
  if sc['gates'].get('last_action_only'):active=[r for r in active if r['t']>=actions[-1]['begin']]
@@ -94,6 +94,67 @@ def metrics(rows,sc,actions,events):
  steps=[math.dist(a['position'],b['position']) for a,b in zip(active,active[1:])]
  gaps=[b['t']-a['t'] for a,b in zip(active,active[1:])]
  m=dict(samples=len(active),duration=active[-1]['t']-active[0]['t'],yaw_travel=travel,yaw_excess=travel-abs(delta(yaw[0],yaw[-1])),pitch_travel=pitch,path_length=sum(steps),max_sample_gap=max(gaps,default=0),p95_sample_gap=sorted(gaps)[int(len(gaps)*.95)] if gaps else 0,min_hp=min(r['hp'] for r in active),reversals=[],idle_spans=[])
+ # Use rendered frame numbers rather than Python call intervals. A skill can
+ # reach its goal and still look robotic when a new target starts at the full
+ # turn rate or reverses in one frame.
+ fps=sc['spec'].get('fps',60);rates=[];frame_steps=[]
+ for u,v in zip(active,active[1:]):
+  frames=v['frame']-u['frame']
+  if frames>0:
+   yaw_step=delta(u['yaw'],v['yaw']);pitch_step=v['pitch']-u['pitch']
+   rates.append(dict(frame=v['frame'],yaw=yaw_step/frames*fps,
+                     pitch=pitch_step/frames*fps))
+   frame_steps.append(dict(yaw=abs(yaw_step)/frames,pitch=abs(pitch_step)/frames))
+ acceleration=[]
+ for u,v in zip(rates,rates[1:]):
+  frames=v['frame']-u['frame']
+  if frames>0:
+   acceleration.append(dict(yaw=abs(v['yaw']-u['yaw'])/frames*fps,
+                            pitch=abs(v['pitch']-u['pitch'])/frames*fps))
+ # RPC samples do not expose the engine's frame dtime: one long rendered frame
+ # must not be divided by an assumed 1/fps. Measure perceptible angular travel
+ # over a real 120 ms window instead; a genuine instant look still dominates
+ # that window, while ordinary scheduler jitter does not become a false snap.
+ window_rates=[]
+ for i in range(len(active)-1):
+  yaw_distance=pitch_distance=0
+  for j in range(i+1,len(active)):
+   yaw_distance+=abs(delta(active[j-1]['yaw'],active[j]['yaw']))
+   pitch_distance+=abs(active[j]['pitch']-active[j-1]['pitch'])
+   elapsed=active[j]['t']-active[i]['t']
+   if elapsed>=.12:
+    if elapsed<=.25:window_rates.append((yaw_distance/elapsed,pitch_distance/elapsed))
+    break
+ m['max_yaw_rate']=max((x[0] for x in window_rates),default=0)
+ m['max_pitch_rate']=max((x[1] for x in window_rates),default=0)
+ m['max_yaw_frame_step']=max((x['yaw'] for x in frame_steps),default=0)
+ m['max_pitch_frame_step']=max((x['pitch'] for x in frame_steps),default=0)
+ m['max_native_yaw_velocity']=max((abs(r['steering_yaw_velocity']) for r in active),default=0)
+ m['max_native_pitch_velocity']=max((abs(r['steering_pitch_velocity']) for r in active),default=0)
+ m['max_yaw_acceleration']=max((x['yaw'] for x in acceleration),default=0)
+ m['max_pitch_acceleration']=max((x['pitch'] for x in acceleration),default=0)
+ # Audit every path leg, not just nominally straight examples. Trim the
+ # intentional start/arrival ramps and flag any stop after motion has begun
+ # and before it has finally ended. This catches walk-stop-walk behavior in
+ # detours, mining, pickups, ladders, and construction approaches.
+ path_idle=[]
+ for i,event in enumerate(events):
+  if event['event']!='follow_path':continue
+  end=next((later['t'] for later in events[i+1:]
+            if later['event'] in ('arrived','follow_path')),active[-1]['t'])
+  leg=[r for r in active if event['t']<=r['t']<=end]
+  moving=[j for j,r in enumerate(leg)
+          if math.sqrt(sum(v*v for v in r['velocity']))>.25]
+  if len(moving)<2:continue
+  leg=leg[moving[0]:moving[-1]+1];idle=None;longest=0
+  for r in leg:
+   is_moving=math.sqrt(sum(v*v for v in r['velocity']))>.25
+   if not is_moving and idle is None:idle=r['t']
+   elif is_moving and idle is not None:
+    longest=max(longest,r['t']-idle);idle=None
+  path_idle.append(dict(start=event['t'],end=end,max_idle=longest))
+ m['path_middle_idle_legs']=path_idle
+ m['max_path_middle_idle']=max((x['max_idle'] for x in path_idle),default=0)
  # Significant changes in turn direction: ignore sub-degree replication noise.
  anchor=yaw[0];extreme=anchor;direction=0
  for r,v in zip(active,yaw):
@@ -105,8 +166,22 @@ def metrics(rows,sc,actions,events):
  def gate(name,value,limit,ok):expected.append(dict(check=name,observed=value,limit=limit,pass_=bool(ok)))
  gates=sc['gates'];wanted=gates.get('expected_status','success');gate('skill_outcome',[x['result'].get('status') for x in actions],wanted,all(x['result'].get('status')==wanted for x in actions))
  gate('no_damage',m['min_hp'],20,m['min_hp']==20)
+ # Read the controller state directly; observe/RPC timing is not a sound clock
+ # for reconstructing an instantaneous engine velocity.
+ gate('native_camera_yaw_rate',m['max_native_yaw_velocity'],225.01,m['max_native_yaw_velocity']<=225.01)
+ gate('native_camera_pitch_rate',m['max_native_pitch_velocity'],225.01,m['max_native_pitch_velocity']<=225.01)
+ # A single-frame teleport is still visible regardless of rate-clock aliasing.
+ # Ordinary 30 fps motion at the native cap is 7.5 degrees per frame.
+ gate('no_instant_yaw_jump',m['max_yaw_frame_step'],12,m['max_yaw_frame_step']<=12)
+ gate('no_instant_pitch_jump',m['max_pitch_frame_step'],12,m['max_pitch_frame_step']<=12)
+ # Sparse client observations can straddle two target changes, so acceleration
+ # remains diagnostic here. tests/native/steering_regression.py enforces the
+ # exact 900 deg/s^2 invariant at every rendered frame.
  # Instrumentation validity is its own outcome, never mislabel missing frames as smoothness.
  gate('sampling_p95_seconds',m['p95_sample_gap'],.12,m['p95_sample_gap']<=.12)
+ if path_idle:
+  gate('no_walk_stop_walk_seconds',m['max_path_middle_idle'],.20,
+       m['max_path_middle_idle']<=.20)
  if gates.get('straight') or gates.get('no_loop'):
   gate('unnecessary_yaw_travel_degrees',m['yaw_excess'],gates['max_excess_yaw'],m['yaw_excess']<=gates['max_excess_yaw'])
  if gates.get('straight'):
@@ -282,9 +357,13 @@ with session.connect(Game) as g:
      if sc['id'] in ('build_row','harvest','blueprint','chest','smelt'):
       navs=sum(e['event']=='follow_path' for e in events)
       # Real drops scatter randomly. Each observed pickup destination is a
-      # legitimate leg; each confirmed harvest batch may also need an approach.
-      # Require reasons, not a fixed count tied to one RNG draw.
-      limit={'build_row':2,'harvest':max(1,sum(e['event']=='harvest_batch' for e in events))+sum(e['event']=='pickup_track' for e in events),'blueprint':0,'chest':1,'smelt':1}[sc['id']]
+      # legitimate leg; each confirmed harvest batch may need an approach, and
+      # an explicitly logged blocked interaction stance may need one adjacent
+      # stance. Require a recorded reason, not a fixed count tied to RNG.
+      harvest_legs=(max(1,sum(e['event']=='harvest_batch' for e in events))+
+                    sum(e['event']=='pickup_track' for e in events)+
+                    sum(e['event']=='interaction_reposition' for e in events))
+      limit={'build_row':2,'harvest':harvest_legs,'blueprint':0,'chest':1,'smelt':1}[sc['id']]
       checks.append(dict(check='bounded_work_repositioning',observed=navs,limit=limit,pass_=navs<=limit))
      if sc['gates'].get('soil_guard'):
       snap=g.observe(6);node=next((n for n in snap.raw['nodes'] if n['position']==[0,101,1]),None)

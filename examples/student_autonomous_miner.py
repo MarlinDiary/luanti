@@ -500,6 +500,17 @@ def run_strategy(
         if initial.control == "manual":
             report.update(status="stopped", reason="manual_takeover")
             return report
+        # The death form is intentionally a menu, so the client rejects
+        # acquire until respawn. Recover before taking control rather than
+        # making a long-running policy require a manual click after restart.
+        if initial.dead:
+            record("respawn", reason="initial_player_dead")
+            game.respawn()
+            initial = game.wait_for(
+                lambda current: not current.dead and not current.raw.get("menu_open"),
+                timeout=10,
+            )
+            policy.runtime.respawns += 1
         if initial.control != "agent":
             game.take_control()
         if game.exploration_memory is None:

@@ -7,7 +7,9 @@
 
 extern int SDL_SetRelativeMouseMode(int enabled);
 extern void SDL_WarpMouseInWindow(void *window, int x, int y);
+#ifndef COURSE_CURSOR_AUDIT_NO_AUDIO
 extern void *alcOpenDevice(const char *name);
+#endif
 
 static void record(const char *event)
 {
@@ -32,16 +34,20 @@ static void audited_warp(void *window, int x, int y)
     record("WARP_REQUESTED");
 }
 
+#ifndef COURSE_CURSOR_AUDIT_NO_AUDIO
 static void *silent_audio_device(const char *name)
 {
     (void)name;
     record("AUDIO_DEVICE_BLOCKED");
     return NULL;
 }
+#endif
 
 __attribute__((used)) static struct { const void *replacement; const void *original; }
 interpose[] __attribute__((section("__DATA,__interpose"))) = {
     { (const void *)audited_relative, (const void *)SDL_SetRelativeMouseMode },
     { (const void *)audited_warp, (const void *)SDL_WarpMouseInWindow },
+#ifndef COURSE_CURSOR_AUDIT_NO_AUDIO
     { (const void *)silent_audio_device, (const void *)alcOpenDevice }
+#endif
 };

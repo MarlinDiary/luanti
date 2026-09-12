@@ -261,8 +261,9 @@ class ExecutorTests(unittest.TestCase):
 
 
 class LoopGame:
-    def __init__(self):
+    def __init__(self, *, dead=False):
         self.control = "observe"
+        self.dead = dead
         self.diamonds = 0
         self.exploration_memory = None
         self.recipe_book = BOOK
@@ -274,6 +275,7 @@ class LoopGame:
             (miner.DIAMOND_PICK, 1, 0),
             *((miner.DIAMOND, self.diamonds, 0),) if self.diamonds else (),
             y=-48,
+            dead=self.dead,
             control=self.control,
             revision=self.diamonds + 1,
         )
@@ -281,6 +283,16 @@ class LoopGame:
     def take_control(self):
         self.calls.append("take_control")
         self.control = "agent"
+
+    def respawn(self):
+        self.calls.append("respawn")
+        self.dead = False
+
+    def wait_for(self, predicate, timeout=5):
+        state = self.observe()
+        if not predicate(state):
+            raise AssertionError("fixture did not reach the expected state")
+        return state
 
     def remember_location(self, name):
         self.calls.append(("remember_location", name))
@@ -300,6 +312,25 @@ class LoopGame:
 
 
 class LoopTests(unittest.TestCase):
+    def test_initial_death_respawns_before_control_acquisition(self):
+        game = LoopGame(dead=True)
+        events = []
+        report = miner.run_strategy(
+            game,
+            config=miner.MinerConfig(max_actions=1),
+            emit=events.append,
+            sleep=lambda _: None,
+            survival=False,
+        )
+        self.assertEqual(report["status"], "bounded_complete")
+        self.assertEqual(report["respawns"], 1)
+        self.assertLess(game.calls.index("respawn"), game.calls.index("take_control"))
+        self.assertTrue(any(
+            event.get("event") == "respawn" and
+            event.get("reason") == "initial_player_dead"
+            for event in events
+        ))
+
     def test_bounded_mode_exercises_same_default_loop_and_releases_control(self):
         game = LoopGame()
         events = []
