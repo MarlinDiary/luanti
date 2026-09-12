@@ -23,6 +23,20 @@ def world(n=5):
     return w
 
 class PathTests(unittest.TestCase):
+    def test_blocked_precise_endpoint_does_not_replan_same_cell_forever(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        from luanti_course.skills import navigate, Failure
+        w=world()
+        s=SimpleNamespace(position=(0,.5,0),raw={})
+        ctx=SimpleNamespace(world=w,read=lambda r=0:s,game=SimpleNamespace(capabilities=('steer',)),
+                            blocked=set(),within=lambda p:True,log=lambda *a,**k:None,
+                            stop_input=lambda:None,sleep=lambda _:None)
+        with patch('luanti_course.skills.follow_path',return_value=(False,((0,1,0),(0,1,0)))) as follow:
+            with self.assertRaises(Failure) as error:navigate(ctx,(.4,.5,0),tolerance=.05)
+        self.assertEqual(error.exception.reason,'movement_blocked')
+        self.assertEqual(follow.call_count,1)
+
     def test_coordinate_convention(self):
         self.assertEqual(cell((0,99.5,-2)),(0,100,-2))
         self.assertEqual(feet((0,100,-2)),(0,99.5,-2))

@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 import json
 import math
 import time
@@ -51,13 +51,27 @@ PICKS = (WOOD_PICK, STONE_PICK, IRON_PICK, DIAMOND_PICK)
 # A four-equal-side rotation would eventually trace the same square again.
 TUNNEL_PATTERN = ((1, 0, 0), (0, 0, 1), (-1, 0, 0), (0, 0, 1))
 
+# A healthy miner stands its ground instead of leading every nearby mob into
+# another retreat.  The supervisor still switches to flee_from at critical HP
+# and keeps projectile, blast, fire, hazard and breath reactions above combat.
+DEFAULT_ENEMY_POLICY = "defend"
+
+
+def enemy_policy(state, replace_at=52_000):
+    """Do not pick unwinnable fights before the miner has a stone-tier tool."""
+    return DEFAULT_ENEMY_POLICY if best_pick_rank(state, replace_at) >= 2 else "off"
+
 
 @dataclass(frozen=True)
 class MinerConfig:
     """Student-editable strategy choices, rather than hidden SDK policy."""
 
     target_y: int = -48
-    logs_at_surface: int = 8
+    # Three logs are the exact minimum for a crafting table, a wooden pick,
+    # and enough planks/sticks to continue the full pick ladder.  Requiring a
+    # larger reserve keeps an unarmed player exposed on the surface for no
+    # immediate progress, which is especially costly on a busy survival map.
+    logs_at_surface: int = 3
     cobble_reserve: int = 16
     coal_reserve: int = 4
     raw_iron_target: int = 3
@@ -125,6 +139,10 @@ class Runtime:
     organized_revision: Optional[int] = None
     discard_attempt_revision: Optional[int] = None
     hunger_attempt: Optional[tuple] = None
+    workbench_retreat_needed: bool = False
+    workbench_heading_index: int = 0
+    crafting_resupply_needed: bool = False
+    retreat_after_damage: bool = False
 
 
 def emit_json(event):
@@ -175,7 +193,10 @@ class MinerPolicy:
         if not r.excavation_needed:
             return Action("collect", "seek_required_resource", resource, 1)
         if state.position[1] > c.target_y + 0.5:
-            depth = min(64, max(1, math.ceil(state.position[1] - c.target_y)))
+            # Keep each staircase section continuous, but re-observe exposed
+            # resources and tool wear every eight steps. A 57-step request can
+            # consume a stone pick while walking past the coal it was seeking.
+            depth = min(8, max(1, math.ceil(state.position[1] - c.target_y)))
             return Action("dig_down", "reach_mining_depth", count=depth)
         if r.branches >= c.branches_per_trip:
             return Action("return", "branch_budget_reached")
@@ -199,6 +220,9 @@ class MinerPolicy:
             return Action("escape_hazard", "contact_hazard")
         if state.burning:
             return Action("extinguish_fire", "burning")
+        if r.retreat_after_damage and enemy_policy(
+                state, c.replace_tool_at_wear) == "off":
+            return Action("flee_from", "damaged_during_bootstrap")
         hunger_key = (state.hunger, state.inventory_revision)
         if state.hunger is not None and state.hunger <= 8 and r.hunger_attempt != hunger_key:
             return Action("eat_best_food", "critical_hunger")
@@ -206,7 +230,7 @@ class MinerPolicy:
         used, size = occupied_slots(state)
         if size and used >= size - 2 and r.organized_revision != state.inventory_revision:
             return Action("organize_inventory", "inventory_nearly_full")
-        if size and used >= size - 1 and r.phase == "mine":
+        if size and used >= size - 2 and r.phase == "mine":
             return Action("return", "inventory_full_after_organizing")
         if size and used >= size - 1 and r.phase == "surface" and \
                 r.discard_attempt_revision != state.inventory_revision:
@@ -220,12 +244,30 @@ class MinerPolicy:
         diamonds = inventory_count(state, book, DIAMOND)
         rank = best_pick_rank(state, c.replace_tool_at_wear)
 
-        # Do not get stranded underground without wood for sticks, a table, or
-        # an emergency replacement. Return via the recorded trail first.
-        if logs < 3 and r.phase == "mine" and rank < 4:
-            return Action("return", "wood_reserve_exhausted")
-        if logs < c.logs_at_surface and r.phase == "surface":
-            return Action("collect", "replenish_wood", LOG, c.logs_at_surface - logs)
+        # A 3x3 recipe needs a real table.  If the bounded craft skill proves
+        # that the narrow mine has no placement site, use the already recorded
+        # trail instead of retrying the impossible placement underground.
+        if r.workbench_retreat_needed and r.phase == "mine":
+            return Action("return", "workbench_unavailable_underground")
+        if r.workbench_retreat_needed:
+            # A resumed script's home may itself be a cramped mine entrance.
+            # Open an ordinary two-step level alcove instead of replaying the
+            # same impossible table placement. Direction remains terrain-led.
+            headings = ((1, 0, 0), (0, 0, 1), (-1, 0, 0), (0, 0, -1))
+            return Action("dig_tunnel", "prepare_workbench_alcove", count=2,
+                          direction=headings[r.workbench_heading_index % 4])
+        if r.crafting_resupply_needed and r.phase == "mine":
+            return Action("return", "crafting_materials_unavailable_underground")
+        if r.phase == "surface":
+            # Do not speculatively stockpile raw logs after the first pick.
+            # The initial three-log recipe leaves the planks and sticks needed
+            # by later tools.  Replenish only after a real craft attempt proves
+            # those derived materials are gone.
+            wanted_logs = c.logs_at_surface if (
+                rank == 0 or r.crafting_resupply_needed
+            ) else 0
+            if logs < wanted_logs:
+                return Action("collect", "replenish_wood", LOG, wanted_logs - logs)
 
         # Explicit tool ladder. The collect skill never receives the teacher
         # shortcut allow_tool_crafting=True; replacement remains policy logic.
@@ -233,13 +275,23 @@ class MinerPolicy:
             return Action("craft", "replace_or_bootstrap_pick", WOOD_PICK)
         if rank == 1:
             if cobble < 3:
-                return Action("collect", "stone_pick_material", COBBLE, 3 - cobble)
+                # Stone is commonly hidden below soil, so a visible-node
+                # search can wait until its deadline without ever exposing a
+                # target.  The wooden pick's bootstrap job is to open a short
+                # staircase; the mined stone itself supplies the cobble.
+                return Action(
+                    "dig_down", "mine_stone_for_pick",
+                    count=max(1, 3 - cobble),
+                )
             return Action("craft", "upgrade_to_stone_pick", STONE_PICK)
 
         # Preserve enough stone for a furnace and a spare stone pick before
         # committing to iron. Existing workstations simply make this cheaper.
         if rank < 3:
             if cobble < c.cobble_reserve:
+                if r.excavation_needed:
+                    return Action("dig_down", "expose_reachable_stone",
+                                  count=min(3, max(1, c.cobble_reserve - cobble)))
                 return Action("collect", "furnace_and_spare_stone", COBBLE,
                               c.cobble_reserve - cobble)
             if coal < 1:
@@ -265,11 +317,20 @@ class MinerPolicy:
         key = (action.kind, action.item, action.direction)
         if result.ok:
             self.failures.pop(key, None)
+            if action.kind in {"dig_down", "dig_tunnel"}:
+                # A changed excavation is a new search state, not another
+                # retry at the old face. Otherwise three useful descents
+                # falsely exhaust the horizontal branch budget before any
+                # branch has even been opened.
+                self.failures.pop(("collect", r.desired_resource, None), None)
             r.successful_actions += 1
             if action.kind == "dig_down":
                 r.phase = "mine"
                 r.excavation_needed = False
             elif action.kind == "dig_tunnel":
+                if action.reason == "prepare_workbench_alcove":
+                    r.workbench_retreat_needed = False
+                    return
                 r.phase = "mine"
                 if action.direction and action.direction[0]:
                     r.branches += 1
@@ -280,8 +341,18 @@ class MinerPolicy:
             elif action.kind == "return":
                 r.phase = "surface"
                 r.branches = 0
-                r.cycles += 1
+                # Returning to a workstation to replace a tool is a
+                # maintenance detour, not a completed mining trip.
+                if action.reason not in {"workbench_unavailable_underground",
+                                         "crafting_materials_unavailable_underground"}:
+                    r.cycles += 1
                 r.excavation_needed = False
+                r.workbench_retreat_needed = False
+            elif action.kind == "craft":
+                r.workbench_retreat_needed = False
+                r.crafting_resupply_needed = False
+            elif action.kind == "flee_from":
+                r.retreat_after_damage = False
             elif action.kind == "organize_inventory" and state is not None:
                 r.organized_revision = state.inventory_revision
             elif action.kind == "drop_surplus" and state is not None:
@@ -292,6 +363,10 @@ class MinerPolicy:
 
         self.failures[key] += 1
         reason = result.reason
+        if action.reason == "prepare_workbench_alcove":
+            if reason not in {"player_dead", "player_damaged", "survival_interrupted"}:
+                r.workbench_heading_index += 1
+            return
         if action.kind == "organize_inventory" and state is not None:
             r.organized_revision = state.inventory_revision
         if action.kind == "drop_surplus" and state is not None:
@@ -301,9 +376,18 @@ class MinerPolicy:
             # the same action forever. A changed hunger value or inventory
             # revision makes the choice eligible again.
             r.hunger_attempt = (state.hunger, state.inventory_revision)
+        if action.kind == "craft":
+            if reason == "no_workbench_placement_site":
+                r.workbench_retreat_needed = True
+            if reason in {"missing_materials", "planned_material_missing",
+                          "workbench_required"}:
+                r.crafting_resupply_needed = True
+        if reason == "player_damaged" and state is not None and enemy_policy(
+                state, c.replace_tool_at_wear) == "off":
+            r.retreat_after_damage = True
         if action.kind == "collect" and reason in {
             "resource_not_found", "target_out_of_radius", "path_not_found",
-            "resource_unreachable", "deadline_exceeded",
+            "resource_unreachable", "deadline_exceeded", "pickup_unconfirmed",
         }:
             r.desired_resource = action.item or r.desired_resource
             r.excavation_needed = True
@@ -328,22 +412,19 @@ class MinerPolicy:
 
 
 def reaction_failed(event):
-    if event.get("event") in {"reaction_error", "action_not_yielding", "control_lost"}:
+    if event.get("event") == "reaction_error":
         return True
-    if event.get("event") != "reaction_finished":
-        return False
-    result = event["result"]
-    if result["status"] == "success":
-        return False
-    intervention = result.get("details", {}).get("intervention") or {}
-    return not (
-        result["status"] == "cancelled"
-        and result["reason"] == "survival_interrupted"
-        and intervention.get("action") in {
-            "recover_air", "escape_hazard", "extinguish_fire",
-            "avoid_projectile", "survive_blast", "flee_from",
-            "defend_self", "eat_best_food",
-        }
+    # A bounded reaction can time out while the player is still alive and the
+    # threat is still moving.  That is planner feedback, not a reason for a
+    # long-running policy to exit.  The next observation retries, changes
+    # tactic, respawns, or resumes ordinary work from the real state.
+    return False
+
+
+def reaction_needs_replan(event):
+    return (
+        event.get("event") == "reaction_finished"
+        and event.get("result", {}).get("status") != "success"
     )
 
 
@@ -466,7 +547,20 @@ def execute(game, action, config):
         return game.extinguish_fire(timeout=min(30, config.action_timeout))
     if action.kind == "eat_best_food":
         return game.eat_best_food(timeout=min(20, config.action_timeout))
+    if action.kind == "flee_from":
+        return game.flee_from(
+            safe_distance=14,
+            timeout=min(45, config.action_timeout),
+        )
     raise ValueError(f"unsupported policy action: {action.kind}")
+
+
+def recover_failed_action(game, result):
+    """Repair client-side journey state only when the server rejected it."""
+    if result.reason == "mining_trip_disconnected":
+        game.reset_mining_trip()
+        return "mining_trip_reset"
+    return None
 
 
 def run_strategy(
@@ -522,7 +616,10 @@ def run_strategy(
         record("memory", name="student_miner_home", position=list(home))
 
         if survival:
-            guard = game.survival(SurvivalConfig(enemies="avoid"))
+            guard = game.survival(SurvivalConfig(
+                enemies=enemy_policy(initial, config.replace_tool_at_wear),
+                action_timeout=45,
+            ))
             guard.__enter__()
 
         while True:
@@ -548,14 +645,23 @@ def run_strategy(
                 if guard:
                     guard.pause()
                 game.respawn()
-                game.wait_for(lambda current: not current.dead, timeout=10)
+                respawned = game.wait_for(lambda current: not current.dead, timeout=10)
                 policy.runtime.respawns += 1
                 game.take_control()
                 game.reset_mining_trip()
                 policy.runtime.phase = "surface"
                 policy.runtime.branches = 0
                 policy.runtime.excavation_needed = False
+                policy.runtime.workbench_retreat_needed = False
+                policy.runtime.crafting_resupply_needed = False
+                policy.runtime.retreat_after_damage = False
                 if guard:
+                    guard.config = replace(
+                        guard.config,
+                        enemies=enemy_policy(
+                            respawned, config.replace_tool_at_wear
+                        ),
+                    )
                     for event in guard.events():
                         record("survival", detail=event)
                     guard.resume()
@@ -566,7 +672,7 @@ def run_strategy(
 
             if guard:
                 if guard.busy:
-                    if not guard.wait_idle(timeout=45):
+                    if not guard.wait_idle(timeout=60):
                         report.update(status="stopped", reason="survival_timeout")
                         break
                     continue
@@ -576,6 +682,28 @@ def run_strategy(
                 if any(reaction_failed(event) for event in events):
                     report.update(status="stopped", reason="survival_reaction_failed")
                     break
+                if any(event.get("event") == "action_not_yielding" for event in events):
+                    # The supervisor deliberately paused after its bounded
+                    # handoff deadline.  At this point the policy owns no
+                    # skill, so it can safely resume from a fresh observation.
+                    guard.resume()
+                    record("survival_resumed", reason="action_yield_timeout")
+                    continue
+                if any(reaction_needs_replan(event) for event in events):
+                    record("survival_replan", failures=sum(
+                        reaction_needs_replan(event) for event in events
+                    ))
+                    sleep(0.15)
+                    continue
+
+                desired_enemies = enemy_policy(
+                    state, config.replace_tool_at_wear
+                )
+                if guard.config.enemies != desired_enemies:
+                    guard.config = replace(
+                        guard.config, enemies=desired_enemies
+                    )
+                    record("survival_mode", enemies=desired_enemies)
 
             if config.max_actions is not None and \
                     policy.runtime.successful_actions >= config.max_actions:
@@ -592,6 +720,10 @@ def run_strategy(
 
             fresh = game.observe()
             policy.on_result(action, result, fresh)
+            recovery = recover_failed_action(game, result)
+            if recovery:
+                record("recovery", action=recovery, reason=result.reason)
+                continue
             if action.kind == "return" and result.ok:
                 # The mining skill returned to its real recorded entrance. A
                 # separate named navigation makes multi-stage trips explicit.
@@ -613,6 +745,10 @@ def run_strategy(
 
             if not result.ok:
                 if result.reason in {"player_dead", "survival_interrupted"}:
+                    continue
+                if result.reason == "player_damaged":
+                    # The next decision is an active retreat. Waiting in place
+                    # merely gives the attacker free hits.
                     continue
                 attempt = policy.failures[(action.kind, action.item, action.direction)]
                 delay = min(8.0, 0.5 * (2 ** min(attempt, 4)))

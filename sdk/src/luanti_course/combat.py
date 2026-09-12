@@ -463,11 +463,15 @@ def defend(ctx, radius=8, safe_distance=12, min_hp=6, settle_time=1.0):
     ctx.min_hp=min_hp
     try:attack(ctx,enemies[0],defense_radius=radius)
     except Failure as exc:
-        if exc.reason not in ('health_floor','damage_budget_exceeded'):raise
+        if exc.reason not in ('health_floor','damage_budget_exceeded',
+                              'entity_route_unavailable','entity_route_blocked'):
+            raise
         ctx.log('retreat',reason=exc.reason,hp=ctx.last.hp)
         ctx.min_hp=1;ctx.damage_budget=100;ctx.damage_taken=0
         flee(ctx,enemies,safe_distance,settle_time)
-        ctx.details['outcome']='retreated'
+        ctx.details['outcome']=('retreated_unreachable'
+                                if exc.reason.startswith('entity_route_')
+                                else 'retreated')
 
 
 def escape_hazard(ctx):

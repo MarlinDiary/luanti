@@ -9,7 +9,7 @@ sys.path.insert(0,str(ROOT/'tests/unit'))
 
 from luanti_course import Entity, RecipeBook, SurvivalConfig
 from luanti_course.combat import (incoming_projectiles, explosive_threats,
-    count_ammo, ranged_attack, block_with_shield)
+    count_ammo, ranged_attack, block_with_shield, defend)
 from luanti_course.supervisor import decide
 from luanti_course.skills import Failure
 from test_survival import state, entity
@@ -45,6 +45,18 @@ class ThreatClassificationTests(unittest.TestCase):
     def test_projectile_precedes_food_and_ordinary_enemy(self):
         s=state(hunger=2,entities=(entity(pointable=True),arrow()))
         self.assertEqual(decide(s,SurvivalConfig(enemies='defend'),RecipeBook.voxelibre())['action'],'avoid_projectile')
+
+
+class DefenseFallbackTests(unittest.TestCase):
+    def test_unreachable_hostile_falls_back_to_retreat_in_same_reaction(self):
+        hostile=entity(pointable=True)
+        s=state(entities=(hostile,))
+        c=NS(read=lambda *a:s,last=s,details={},log=lambda *a,**kw:None)
+        with patch('luanti_course.combat.attack',side_effect=Failure('entity_route_unavailable')), \
+             patch('luanti_course.combat.flee') as flee:
+            defend(c)
+        flee.assert_called_once_with(c,(hostile,),12,1.0)
+        self.assertEqual(c.details['outcome'],'retreated_unreachable')
 
 
 class RangedTests(unittest.TestCase):

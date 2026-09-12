@@ -700,6 +700,12 @@ def _navigate(ctx, target, tolerance=.45, approach=False, until=None, through=Fa
                 ctx.stop_input();exploration_goal=None
                 if edge:ctx.blocked.add(edge)
                 ctx.log('replan',blocked_edge=edge)
+                # A blocked sub-cell endpoint has no graph edge to reroute:
+                # A* immediately returns the same one-cell path again. Report
+                # the failed stance so pickup can try another landing instead
+                # of consuming its entire deadline against the same wall.
+                if edge and edge[0]==edge[1]:
+                    raise Failure('movement_blocked',{'target':target,'blocked_edge':edge})
                 if len(ctx.blocked)>40:raise Failure('movement_blocked')
             elif not partial:
                 if through:

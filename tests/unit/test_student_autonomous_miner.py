@@ -45,14 +45,86 @@ class PolicyTests(unittest.TestCase):
     def test_empty_inventory_starts_with_explicit_wood_collection(self):
         _, action = self.action(snapshot())
         self.assertEqual((action.kind, action.item, action.count),
-                         ("collect", miner.LOG, 8))
+                         ("collect", miner.LOG, 3))
+
+    def test_three_logs_are_enough_to_start_the_tool_ladder(self):
+        _, action = self.action(snapshot(("mcl_core:tree", 3, 0)))
+        self.assertEqual((action.kind, action.item),
+                         ("craft", miner.WOOD_PICK))
+
+    def test_crafted_handle_stock_is_not_mistaken_for_missing_raw_logs(self):
+        policy = miner.MinerPolicy()
+        policy.runtime.phase = "mine"
+        state = snapshot(
+            (miner.WOOD_PICK, 1, 0),
+            ("mcl_core:wood", 3, 0),
+            ("mcl_core:stick", 2, 0),
+            (miner.COBBLE, 3, 0),
+            y=11.5,
+        )
+        action = policy.choose(state, BOOK)
+        self.assertEqual((action.kind, action.item),
+                         ("craft", miner.STONE_PICK))
+
+    def test_missing_crafting_material_underground_returns_for_resupply(self):
+        policy = miner.MinerPolicy()
+        policy.runtime.phase = "mine"
+        state = snapshot(
+            (miner.STONE_PICK, 1, 0),
+            (miner.COBBLE, 16, 0),
+            (miner.COAL, 4, 0),
+            (miner.RAW_IRON, 3, 0),
+            y=-48,
+        )
+        craft = policy.choose(state, BOOK)
+        self.assertEqual((craft.kind, craft.item), ("craft", miner.IRON_PICK))
+        policy.on_result(
+            craft,
+            SkillResult("craft", "blocked", "missing_materials"),
+            state,
+        )
+        retreat = policy.choose(state, BOOK)
+        self.assertEqual((retreat.kind, retreat.reason),
+                         ("return", "crafting_materials_unavailable_underground"))
+        policy.on_result(retreat, SkillResult("return_to_entrance", "success"), state)
+        self.assertEqual(policy.runtime.cycles, 0)
+
+    def test_failed_cobble_pickup_exposes_fresh_stone_instead_of_repeating(self):
+        policy = miner.MinerPolicy()
+        state = snapshot((miner.STONE_PICK, 1, 0), (miner.COBBLE, 12, 0), y=10.5)
+        collect = policy.choose(state, BOOK)
+        self.assertEqual(collect.item, miner.COBBLE)
+        policy.on_result(collect, SkillResult("collect", "blocked", "pickup_unconfirmed"), state)
+        next_action = policy.choose(state, BOOK)
+        self.assertEqual((next_action.kind, next_action.reason),
+                         ("dig_down", "expose_reachable_stone"))
+        self.assertLessEqual(next_action.count, 3)
+
+    def test_surface_resupply_is_requested_only_after_observed_shortage(self):
+        policy = miner.MinerPolicy()
+        state = snapshot(
+            (miner.STONE_PICK, 1, 0),
+            (miner.COBBLE, 16, 0),
+            (miner.COAL, 4, 0),
+            (miner.RAW_IRON, 3, 0),
+        )
+        craft = policy.choose(state, BOOK)
+        self.assertEqual((craft.kind, craft.item), ("craft", miner.IRON_PICK))
+        policy.on_result(
+            craft,
+            SkillResult("craft", "blocked", "missing_materials"),
+            state,
+        )
+        collect = policy.choose(state, BOOK)
+        self.assertEqual((collect.kind, collect.item, collect.count),
+                         ("collect", miner.LOG, 3))
 
     def test_tool_progression_is_wood_then_stone_then_iron(self):
         cases = (
             (snapshot(("mcl_core:tree", 8, 0)),
              ("craft", miner.WOOD_PICK)),
             (snapshot(("mcl_core:tree", 8, 0), (miner.WOOD_PICK, 1, 0)),
-             ("collect", miner.COBBLE)),
+             ("dig_down", None)),
             (snapshot(("mcl_core:tree", 8, 0), (miner.STONE_PICK, 1, 0),
                       (miner.COBBLE, 16, 0), (miner.COAL, 4, 0),
                       (miner.RAW_IRON, 3, 0)),
@@ -75,6 +147,70 @@ class PolicyTests(unittest.TestCase):
         _, action = self.action(state)
         self.assertEqual((action.kind, action.item), ("craft", miner.IRON_PICK))
 
+    def test_existing_pick_does_not_top_up_a_noncritical_wood_reserve(self):
+        state = snapshot(
+            ("mcl_core:tree", 7, 0),
+            (miner.STONE_PICK, 1, 0),
+            (miner.COBBLE, 16, 0),
+            y=9.5,
+        )
+        _, action = self.action(state)
+        self.assertEqual((action.kind, action.item), ("collect", miner.COAL))
+
+    def test_wood_pick_mines_for_cobble_instead_of_waiting_for_exposed_stone(self):
+        state = snapshot(
+            ("mcl_core:tree", 8, 0),
+            (miner.WOOD_PICK, 1, 0),
+            y=15.5,
+        )
+        _, action = self.action(state)
+        self.assertEqual(action.kind, "dig_down")
+        self.assertEqual(action.reason, "mine_stone_for_pick")
+        self.assertEqual(action.count, 3)
+
+    def test_missing_underground_workbench_returns_before_replacing_pick(self):
+        policy = miner.MinerPolicy()
+        policy.runtime.phase = "mine"
+        state = snapshot(
+            ("mcl_core:tree", 3, 0),
+            (miner.WOOD_PICK, 1, 0),
+            (miner.COBBLE, 16, 0),
+            y=-29.5,
+        )
+        craft = policy.choose(state, BOOK)
+        self.assertEqual((craft.kind, craft.item), ("craft", miner.STONE_PICK))
+        policy.on_result(
+            craft,
+            SkillResult("craft", "blocked", "no_workbench_placement_site"),
+            state,
+        )
+        retreat = policy.choose(state, BOOK)
+        self.assertEqual((retreat.kind, retreat.reason),
+                         ("return", "workbench_unavailable_underground"))
+        policy.on_result(retreat, SkillResult("return_to_entrance", "success"), state)
+        self.assertEqual(policy.runtime.phase, "surface")
+        self.assertEqual(policy.runtime.cycles, 0)
+
+    def test_cramped_home_opens_a_short_level_workbench_alcove(self):
+        policy = miner.MinerPolicy()
+        state = snapshot((miner.WOOD_PICK, 1, 0), (miner.COBBLE, 16, 0), y=10.5)
+        craft = policy.choose(state, BOOK)
+        policy.on_result(craft, SkillResult("craft", "blocked", "no_workbench_placement_site"), state)
+        alcove = policy.choose(state, BOOK)
+        self.assertEqual((alcove.kind, alcove.reason, alcove.count),
+                         ("dig_tunnel", "prepare_workbench_alcove", 2))
+        self.assertIn(alcove.direction, ((1,0,0),(0,0,1),(-1,0,0),(0,0,-1)))
+        policy.on_result(alcove, SkillResult("dig_tunnel", "blocked", "mining_route_blocked"), state)
+        alternative = policy.choose(state, BOOK)
+        self.assertNotEqual(alternative.direction, alcove.direction)
+        self.assertEqual(alternative.reason, "prepare_workbench_alcove")
+        alcove = alternative
+        policy.on_result(alcove, SkillResult("dig_tunnel", "success"), state)
+        self.assertEqual(policy.runtime.branches, 0)
+        self.assertEqual(policy.runtime.cycles, 0)
+        next_action = policy.choose(state, BOOK)
+        self.assertEqual((next_action.kind, next_action.item), ("craft", miner.STONE_PICK))
+
     def test_iron_pick_seeks_diamond_and_diamonds_upgrade_the_pick(self):
         base = (
             ("mcl_core:tree", 8, 0),
@@ -96,7 +232,9 @@ class PolicyTests(unittest.TestCase):
         search = policy.choose(state, BOOK)
         policy.on_result(search, SkillResult("collect", "blocked", "resource_not_found"))
         descent = policy.choose(state, BOOK)
-        self.assertEqual((descent.kind, descent.count), ("dig_down", 64))
+        # Re-observe exposed coal/iron and wear before spending the whole pick
+        # descending dozens of steps toward the diamond layer.
+        self.assertEqual((descent.kind, descent.count), ("dig_down", 8))
 
         deep = snapshot(
             ("mcl_core:tree", 8, 0), (miner.IRON_PICK, 1, 0),
@@ -127,6 +265,19 @@ class PolicyTests(unittest.TestCase):
         )
         self.assertEqual(policy.choose(state, BOOK).kind, "return")
 
+    def test_successful_excavation_resets_stale_resource_search_failures(self):
+        policy = miner.MinerPolicy()
+        for y in (16, 8, 0, -8):
+            state = snapshot((miner.STONE_PICK, 1, 0), (miner.COBBLE, 16, 0), y=y)
+            search = policy.choose(state, BOOK)
+            self.assertEqual(search.item, miner.COAL)
+            policy.on_result(search, SkillResult("collect", "blocked", "resource_not_found"), state)
+            descent = policy.choose(state, BOOK)
+            self.assertEqual(descent.kind, "dig_down")
+            policy.on_result(descent, SkillResult("dig_down", "success"), state)
+        self.assertEqual(policy.runtime.branches, 0)
+        self.assertEqual(policy.failures[("collect", miner.COAL, None)], 0)
+
     def test_emergencies_precede_inventory_and_mining(self):
         cases = (
             (dict(breath=3), "recover_air"),
@@ -138,6 +289,20 @@ class PolicyTests(unittest.TestCase):
             with self.subTest(expected=expected):
                 _, action = self.action(snapshot(**changes))
                 self.assertEqual(action.kind, expected)
+
+    def test_bootstrap_damage_triggers_immediate_retreat_before_retry(self):
+        policy = miner.MinerPolicy()
+        healthy = snapshot(hp=20)
+        collect = policy.choose(healthy, BOOK)
+        damaged = snapshot(hp=16)
+        policy.on_result(
+            collect,
+            SkillResult("collect", "blocked", "player_damaged"),
+            damaged,
+        )
+        retreat = policy.choose(damaged, BOOK)
+        self.assertEqual((retreat.kind, retreat.reason),
+                         ("flee_from", "damaged_during_bootstrap"))
 
     def test_inventory_pressure_organizes_once_then_returns_from_mine(self):
         filled = tuple((f"test:item_{i}", 1, 0) for i in range(34))
@@ -189,6 +354,22 @@ class RecordingGame:
     def dig_tunnel(self, *args, **kwargs):
         self.calls.append(("dig_tunnel", args, kwargs))
         return SkillResult("dig_tunnel", "success")
+
+    def reset_mining_trip(self):
+        self.calls.append(("reset_mining_trip", (), {}))
+
+
+class FailedActionRecoveryTests(unittest.TestCase):
+    def test_disconnected_mining_trail_starts_a_fresh_excursion(self):
+        game = RecordingGame()
+        result = SkillResult(
+            "dig_down", "blocked", "mining_trip_disconnected"
+        )
+        self.assertEqual(
+            miner.recover_failed_action(game, result),
+            "mining_trip_reset",
+        )
+        self.assertEqual(game.calls, [("reset_mining_trip", (), {})])
 
 
 class DropGame:
@@ -349,6 +530,15 @@ class LoopTests(unittest.TestCase):
 
 
 class ConfigTests(unittest.TestCase):
+    def test_bootstrap_avoids_unwinnable_combat_then_enables_defense(self):
+        self.assertEqual(miner.enemy_policy(snapshot()), "off")
+        self.assertEqual(
+            miner.enemy_policy(snapshot((miner.WOOD_PICK, 1, 0))), "off"
+        )
+        self.assertEqual(
+            miner.enemy_policy(snapshot((miner.STONE_PICK, 1, 0))), "defend"
+        )
+
     def test_optional_bounds_leave_default_infinite(self):
         config = miner.MinerConfig()
         self.assertIsNone(config.max_actions)
@@ -361,6 +551,31 @@ class ConfigTests(unittest.TestCase):
             miner.MinerConfig(tunnel_length=65)
         with self.assertRaises(ValueError):
             miner.MinerConfig(branch_spacing=9)
+
+
+class SurvivalEventTests(unittest.TestCase):
+    def test_bounded_reaction_timeout_requests_replan_instead_of_stopping(self):
+        event = {
+            "event": "reaction_finished",
+            "result": {
+                "operation": "flee_from",
+                "status": "timeout",
+                "reason": "deadline_exceeded",
+                "details": {},
+            },
+        }
+        self.assertFalse(miner.reaction_failed(event))
+
+    def test_survival_worker_error_remains_fatal(self):
+        self.assertTrue(miner.reaction_failed({
+            "event": "reaction_error",
+            "message": "worker stopped",
+        }))
+
+    def test_action_yield_timeout_is_recoverable_supervisor_feedback(self):
+        self.assertFalse(miner.reaction_failed({
+            "event": "action_not_yielding",
+        }))
 
 
 if __name__ == "__main__":
