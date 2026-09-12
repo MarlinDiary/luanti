@@ -38,7 +38,7 @@ with Game.connect() as game:      # 先在课程客户端中进入世界
 - 学生动作：平滑 `look()`、显式 `game.motion()` 连续短循环；异常退出和停滞租约都会停止。
 - 控制互斥：默认观看；Agent 运行不抓鼠标；F8 显式人工操作，Esc 停止并释放。
 
-请先看 [控制模式](docs/control-modes.md)、[技能 API 与边界](docs/skills.md)、[地形覆盖与验收边界](docs/terrain-coverage.md) 和 [示例](examples/wooden_pickaxe.py)。
+请先看 [控制模式](docs/control-modes.md)、[技能 API 与边界](docs/skills.md)、[地形覆盖与验收边界](docs/terrain-coverage.md) 和 [学生策略示例](docs/student-strategies.md)。`student_first_project.py` 是可读的第一课；`student_autonomous_miner.py` 是默认持续运行的完整参考策略，会维护工具、下矿、横向开矿道、寻找铁/煤/钻石、返程并重新开始。再看最小的 [两步技能示例](examples/wooden_pickaxe.py)。
 
 ## 生存与快速反应（0.11）
 
